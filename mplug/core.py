@@ -66,7 +66,7 @@ class meta:
 def callmeta(m: meta, field: Optional[str]) -> Any:
     # TODO: this could also depend on type and default value
     if not field:
-        raise ValueError("`dynamic' must be applied inside Annotated[...]")
+        raise ValueError("`meta' must be applied inside Annotated[...]")
     return m.f(field)
 
 # should be `All = NewType("All", Sequence[T])`, but generics don't work with newtypes
@@ -100,8 +100,12 @@ class OptionalDep:
 class AllDep:
     inner: Dep
 
-# NOTE: if wrapped, must be in this exact order
-Edge = OptionalDep | AllDep | Dep
+@dataclass(slots=True, frozen=True)
+class ConvertDep:
+    typ: type
+    inner: Dep
+
+Edge = OptionalDep | ConvertDep | AllDep | Dep
 
 @dataclass(slots=True, frozen=True)
 class Func:
@@ -137,7 +141,7 @@ def parsedep(dep: Dep, field: Optional[str] = None) -> Edge:
             while True:
                 match a:
                     case Provided():
-                        return parsedep(a.dep, field)
+                        return ConvertDep(typ, parsedep(a.dep, field))
                     case meta():
                         a = callmeta(a, field)
                     case _:
@@ -626,11 +630,32 @@ def inject(scope: Scope, want: Edge, colored: Optional[set[Dep]] = None) -> Foun
     if TRACE:
         print(f"mplug: inject {want} ({scope})", file=stderr)
     if isinstance(want, OptionalDep):
-        optional = True
-        want = want.inner
-    else:
-        optional = False
+        try:
+            return inject(scope, want.inner, colored)
+        except NotFound:
+            return Found(None, scope)
     if v := find_presolved(scope, want):
+        return v
+    if isinstance(want, ConvertDep):
+        v = inject(scope, want.inner, colored)
+        owner = v.scope
+        typ = want.typ
+        if v.is_await:
+            task = v.task
+            async def aw():
+                value = await task
+                if not isinstance(value, typ):
+                    value = typ(value)
+                owner.values[want] = value
+                return value
+            value = AwaitSlot(create_task(aw()))
+            v = Found(value, v.scope)
+        else:
+            value = v.value
+            if not isinstance(value, typ):
+                value = typ(value)
+            v = Found(value, v.scope)
+        owner.values[want] = value
         return v
     if colored is None:
         colored = set()
@@ -648,12 +673,7 @@ def inject(scope: Scope, want: Edge, colored: Optional[set[Dep]] = None) -> Foun
         scope.values[want] = res
         return Found(res, scope)
     else:
-        try:
-            return solveone(scope, want, colored)
-        except NotFound:
-            if optional:
-                return Found(None, scope)
-            raise
+        return solveone(scope, want, colored)
 
 def subscriptions(scope: Scope, want: Subscription) -> Iterator[Func]:
     for t in scope.inclusive_topo:
