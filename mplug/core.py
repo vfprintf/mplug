@@ -618,7 +618,7 @@ def solveall(scope: Scope, want: Dep, colored: set[Dep]) -> list[Found]:
     # TODO: this is not optimal, it overwrites scope.values
     result = []
     for t in scope.inclusive_topo:
-        for func in scope.graph(want):
+        for func in t.graph(want):
             try:
                 result.append(solvefunc(scope, want, colored, t, func))
             except NotFound:
